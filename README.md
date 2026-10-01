@@ -107,13 +107,13 @@ Frozen LID tagger (`lib/lid_tagger.py`, xlm-roberta-base, 2 epochs): test token-
 Three encoders, same data, same training loop, same pooling variants. Small encoders: 3 epochs, batch 32,
 full fine-tuning (lr 2e-5 for XLM-R, 5e-5 for MiniLM). Qwen2.5-7B-Instruct: LoRA r=8 on all linear layers,
 4-bit NF4 base, batch 8, lr 1e-4, 2 epochs, ~40 min per run on one RTX A5000.
-Cells with +- are mean +- std over seeds {42, 1, 2}; the rest are seed 42 only.
+Cells with +- are mean +- std over seeds {42, 1, 2} (3 seeds) or {42, 1} where marked (2 seeds); the rest are seed 42 only.
 
 | encoder | params | baseline (none) | binary, gold | distance, gold | binary, predicted | distance, predicted | distance + mlp, gold |
 |---|---|---|---|---|---|---|---|
 | MiniLM-L12 (paraphrase-multilingual) | 118M | 0.695 +- 0.006 | 0.693 +- 0.000 | 0.698 +- 0.006 | 0.689 | 0.704 | 0.700 |
 | xlm-roberta-base | 278M | 0.715 +- 0.004 | 0.715 +- 0.003 | 0.712 +- 0.004 | 0.705 | 0.711 | 0.719 |
-| Qwen2.5-7B-Instruct (QLoRA) | 7.6B | 0.729 | **0.735** | 0.730 | 0.724 | 0.734 | **0.740** |
+| Qwen2.5-7B-Instruct (QLoRA) | 7.6B | 0.729 +- 0.000 (2 seeds) | **0.735** | 0.730 | 0.724 | 0.734 | 0.732 +- 0.011 (2 seeds) |
 
 Full per-run table incl. dev F1 / accuracy / P / R: `python3 lib/summarize.py` -> `results/exp2/summary.csv`.
 
@@ -132,12 +132,12 @@ Test macro-F1 by number of switch points per tweet (`lib/analyze.py`; every test
 **Take-aways.**
 1. Encoder size dominates: baselines go 0.695 -> 0.715 -> 0.729 from MiniLM to XLM-R to Qwen-7B, a bigger spread than any pooling variant produces within one encoder.
 2. On the two small encoders, switch information does **not** move overall test F1 beyond seed noise (+-0.4-0.6 F1).
-3. On Qwen2.5-7B every switch-aware variant is at or above the baseline (0.730-0.740 vs 0.729), and the best run overall is `distance + mlp` at 0.740 (+1.1). These are single seeds; a second seed is being run for the baseline and `distance + mlp`.
-4. Where the gain comes from: on switch-heavy tweets (6-9 switches) Qwen `binary` and `distance` beat the baseline by +2.4 / +1.9 F1, while on 1-2-switch tweets the linear variants are *below* the baseline (-1.1 to -1.5). The switch bias helps exactly where there are many switches to exploit, and slightly hurts where there are few. The `mlp` scorer removes the low-switch penalty (0.743 vs 0.729).
+3. On Qwen2.5-7B every seed-42 switch-aware variant is at or above the baseline (0.730-0.740 vs 0.729), but a second seed of `distance + mlp` scored 0.724, so its 2-seed mean is 0.732 +- 0.011 vs a very stable baseline 0.729 +- 0.000. The Qwen gains are therefore also within seed noise; the single best run (0.740) was a favourable seed.
+4. Where any gain lives: on switch-heavy tweets (6-9 switches) Qwen `binary` and `distance` beat the baseline by +2.4 / +1.9 F1 (seed 42), while on 1-2-switch tweets the linear variants are *below* the baseline (-1.1 to -1.5). The switch bias helps where there are many switches to exploit and slightly hurts where there are few; the two effects roughly cancel in the overall score. This bucket pattern is the most promising lead and needs more seeds to confirm.
 5. Switch points from the frozen tagger (91% token accuracy) instead of gold LID cost 0-1 F1; the `distance` variant is the more robust of the two to tagger noise.
 6. Dev F1 (~0.63-0.66) is consistently ~7 points below test F1 for every model; the SentiMix dev split is harder than test. Dev is only used to pick the best epoch.
 
-Next steps: more seeds for the Qwen variants, fuse `e_i^sw` into `h_i` (not only into the attention score),
+Next steps: 3+ seeds for every Qwen variant (the deciding evidence is still missing), fuse `e_i^sw` into `h_i` (not only into the attention score),
 PESTO-style switch-relative positional encoding, and the contrastive variants from the experiment notes.
 
 Notes: the `emt` (emoticon) tag of SentiMix is folded into `o`; a handful of rows with a non-numeric
