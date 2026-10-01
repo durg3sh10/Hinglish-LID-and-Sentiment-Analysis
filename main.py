@@ -32,6 +32,8 @@ def parse_args():
     p.add_argument("--freeze_encoder", action="store_true")
     p.add_argument("--lora", action="store_true", help="LoRA on the encoder (for 7B-class models)")
     p.add_argument("--lora_r", type=int, default=8)
+    p.add_argument("--lora_targets", default="q_proj,k_proj,v_proj,o_proj,up_proj,gate_proj,down_proj",
+                   help="comma-separated LoRA target modules (decoder naming; same set as exp1)")
     p.add_argument("--load_in_4bit", action="store_true")
     p.add_argument("--no_amp", action="store_true")
     p.add_argument("--max_train_samples", type=int, default=None, help="smoke tests")

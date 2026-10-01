@@ -66,7 +66,8 @@ class SwitchAttentionPooling(nn.Module):
 class SwitchAwareSentimentModel(nn.Module):
     def __init__(self, model_name: str, num_labels: int = 3, pooling: str = "binary",
                  switch_dim: int = 16, scorer: str = "linear", dropout: float = 0.1,
-                 lora: bool = False, lora_r: int = 8, load_in_4bit: bool = False):
+                 lora: bool = False, lora_r: int = 8, load_in_4bit: bool = False,
+                 lora_targets: str = "q_proj,k_proj,v_proj,o_proj,up_proj,gate_proj,down_proj"):
         super().__init__()
         kwargs = {}
         if load_in_4bit:
@@ -82,6 +83,7 @@ class SwitchAwareSentimentModel(nn.Module):
                 self.encoder = prepare_model_for_kbit_training(self.encoder)
             self.encoder = get_peft_model(self.encoder, LoraConfig(
                 r=lora_r, lora_alpha=2 * lora_r, lora_dropout=0.05, bias="none",
+                target_modules=[t.strip() for t in lora_targets.split(",") if t.strip()],
                 task_type="FEATURE_EXTRACTION"))
             self.encoder.print_trainable_parameters()
         hidden = self.encoder.config.hidden_size

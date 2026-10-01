@@ -94,46 +94,51 @@ cd results/exp2 && python3 ../../evaluate_all.py --ground ground.csv --pred-glob
 
 or simply `bash run.sh [MODEL_NAME]`. Smoke test on CPU/GPU with
 `python3 main.py --max_train_samples 400 --max_eval_samples 200 --epochs 1`.
-Large decoder models: `--model_name mistralai/Mistral-7B-Instruct-v0.3 --lora --load_in_4bit --batch_size 8`.
+Large decoder models (QLoRA): `python3 main.py --model_name Qwen/Qwen2.5-7B-Instruct --lora --load_in_4bit --batch_size 8 --lr 1e-4 --epochs 2`.
+Other encoders: `--model_name sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 --lr 5e-5`.
 
 Each run writes `results/exp2/<run>_metrics.json` with dev/test accuracy and macro P/R/F1
 (same formula as `evaluate_all.py`) plus a breakdown on sentences **with** vs **without** a switch.
 
-### Results (xlm-roberta-base, 3 epochs, batch 32, lr 2e-5 / head 1e-3, max_len 128, 2 x RTX A5000)
+### Results (SentiMix test, 2 944 roman tweets, macro-F1 from the shared `evaluate_all.py`)
 
-Frozen LID tagger (`lib/lid_tagger.py`, 2 epochs): dev token-acc 0.918 / macro-F1 0.929, test token-acc 0.912 / macro-F1 0.922.
+Frozen LID tagger (`lib/lid_tagger.py`, xlm-roberta-base, 2 epochs): test token-acc 0.912 / macro-F1 0.922.
 
-Sentiment on the SentiMix test split (2 944 roman sentences), macro P/R/F1 from the shared `evaluate_all.py`.
-Rows with 3 seeds report mean +- std over seeds {42, 1, 2}; the others are seed 42 only.
+Three encoders, same data, same training loop, same pooling variants. Small encoders: 3 epochs, batch 32,
+full fine-tuning (lr 2e-5 for XLM-R, 5e-5 for MiniLM). Qwen2.5-7B-Instruct: LoRA r=8 on all linear layers,
+4-bit NF4 base, batch 8, lr 1e-4, 2 epochs, ~40 min per run on one RTX A5000.
+Cells with +- are mean +- std over seeds {42, 1, 2}; the rest are seed 42 only.
 
-| pooling | switch source | scorer | seeds | dev F1 | test acc | test P | test R | test F1 |
-|---|---|---|---|---|---|---|---|---|
-| none (baseline) | - | linear | 3 | 0.642 | 0.711 | 0.716 | 0.715 | 0.715 +- 0.004 |
-| binary | gold | linear | 3 | 0.638 | 0.711 | 0.717 | 0.714 | 0.715 +- 0.003 |
-| distance | gold | linear | 3 | 0.640 | 0.708 | 0.714 | 0.710 | 0.712 +- 0.004 |
-| binary | predicted | linear | 1 | 0.639 | 0.701 | 0.706 | 0.704 | 0.705 |
-| distance | predicted | linear | 1 | 0.639 | 0.707 | 0.713 | 0.708 | 0.711 |
-| none (baseline) | - | mlp | 1 | 0.632 | 0.708 | 0.711 | 0.713 | 0.711 |
-| binary | gold | mlp | 1 | 0.640 | 0.710 | 0.714 | 0.715 | 0.714 |
-| distance | gold | mlp | 1 | 0.642 | 0.716 | 0.720 | 0.719 | **0.719** |
+| encoder | params | baseline (none) | binary, gold | distance, gold | binary, predicted | distance, predicted | distance + mlp, gold |
+|---|---|---|---|---|---|---|---|
+| MiniLM-L12 (paraphrase-multilingual) | 118M | 0.695 +- 0.006 | 0.693 +- 0.000 | 0.698 +- 0.006 | 0.689 | 0.704 | 0.700 |
+| xlm-roberta-base | 278M | 0.715 +- 0.004 | 0.715 +- 0.003 | 0.712 +- 0.004 | 0.705 | 0.711 | 0.719 |
+| Qwen2.5-7B-Instruct (QLoRA) | 7.6B | 0.729 | **0.735** | 0.730 | 0.724 | 0.734 | **0.740** |
 
-Test macro-F1 by number of switch points per sentence (`lib/analyze.py`, linear scorer, gold LID, mean over 3 seeds):
+Full per-run table incl. dev F1 / accuracy / P / R: `python3 lib/summarize.py` -> `results/exp2/summary.csv`.
 
-| pooling | 1-2 switches (n=916) | 3-5 (n=1640) | 6-9 (n=381) |
+Test macro-F1 by number of switch points per tweet (`lib/analyze.py`; every test tweet has >= 1 switch):
+
+| encoder / pooling | 1-2 switches (n=916) | 3-5 (n=1640) | 6-9 (n=381) |
 |---|---|---|---|
-| none | 0.734 | 0.708 | 0.699 |
-| binary | 0.732 | 0.708 | 0.705 |
-| distance | 0.731 | 0.703 | 0.703 |
+| xlm-roberta-base, none (3 seeds) | 0.734 | 0.708 | 0.699 |
+| xlm-roberta-base, binary (3 seeds) | 0.732 | 0.708 | 0.705 |
+| xlm-roberta-base, distance (3 seeds) | 0.731 | 0.703 | 0.703 |
+| Qwen2.5-7B, none | 0.729 | 0.728 | 0.730 |
+| Qwen2.5-7B, binary | 0.714 | 0.740 | **0.754** |
+| Qwen2.5-7B, distance | 0.718 | 0.731 | 0.749 |
+| Qwen2.5-7B, distance + mlp | 0.743 | 0.735 | 0.745 |
 
-**Take-aways (so far).**
-1. With `xlm-roberta-base`, adding switch-point information to attention pooling does **not** change test macro-F1 beyond seed noise (+-0.4 F1): baseline 0.715, binary 0.715, distance 0.712.
-2. The only hint of a gain is on switch-heavy sentences (6-9 switches: +0.6 F1 for binary), and the best single run is `distance + mlp` scorer (0.719), but both are single-seed / small-n and need more seeds before we claim anything.
-3. Using switch points from the frozen tagger instead of gold LID costs ~0-1 F1, i.e. tagger errors (91% token accuracy) do not wipe out the signal, there simply is not much signal to lose.
-4. Dev F1 (~0.64) is consistently ~7 points below test F1 (~0.71); the SentiMix dev split is harder than the test split.
+**Take-aways.**
+1. Encoder size dominates: baselines go 0.695 -> 0.715 -> 0.729 from MiniLM to XLM-R to Qwen-7B, a bigger spread than any pooling variant produces within one encoder.
+2. On the two small encoders, switch information does **not** move overall test F1 beyond seed noise (+-0.4-0.6 F1).
+3. On Qwen2.5-7B every switch-aware variant is at or above the baseline (0.730-0.740 vs 0.729), and the best run overall is `distance + mlp` at 0.740 (+1.1). These are single seeds; a second seed is being run for the baseline and `distance + mlp`.
+4. Where the gain comes from: on switch-heavy tweets (6-9 switches) Qwen `binary` and `distance` beat the baseline by +2.4 / +1.9 F1, while on 1-2-switch tweets the linear variants are *below* the baseline (-1.1 to -1.5). The switch bias helps exactly where there are many switches to exploit, and slightly hurts where there are few. The `mlp` scorer removes the low-switch penalty (0.743 vs 0.729).
+5. Switch points from the frozen tagger (91% token accuracy) instead of gold LID cost 0-1 F1; the `distance` variant is the more robust of the two to tagger noise.
+6. Dev F1 (~0.63-0.66) is consistently ~7 points below test F1 for every model; the SentiMix dev split is harder than test. Dev is only used to pick the best epoch.
 
-Next steps: more seeds for the `mlp` scorer, fuse `e_i^sw` into `h_i` (not only into the attention score), try
-the contrastive / PESTO-style positional variants from the experiment notes, and repeat with the group's
-7B models (`--lora --load_in_4bit`).
+Next steps: more seeds for the Qwen variants, fuse `e_i^sw` into `h_i` (not only into the attention score),
+PESTO-style switch-relative positional encoding, and the contrastive variants from the experiment notes.
 
 Notes: the `emt` (emoticon) tag of SentiMix is folded into `o`; a handful of rows with a non-numeric
 id emitted by the shared parser (a token literally spelled `meta`) and one exact duplicate id per

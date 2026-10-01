@@ -88,6 +88,13 @@ def run_eval(model, loader, device, use_amp):
     return metrics, pd.DataFrame({"id": ids, "predictions": y_pred})
 
 
+def trainable_state(model):
+    """State dict restricted to trainable tensors (LoRA adapters + heads), so 4-bit quantized
+    encoder weights are never snapshotted or re-loaded."""
+    names = {n for n, p in model.named_parameters() if p.requires_grad}
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items() if k in names}
+
+
 def train_and_evaluate(args):
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -116,8 +123,10 @@ def train_and_evaluate(args):
 
     model = SwitchAwareSentimentModel(args.model_name, pooling=args.pooling, switch_dim=args.switch_dim,
                                       scorer=args.scorer, lora=args.lora, lora_r=args.lora_r,
-                                      load_in_4bit=args.load_in_4bit)
-    if not args.load_in_4bit:
+                                      load_in_4bit=args.load_in_4bit, lora_targets=args.lora_targets)
+    if args.load_in_4bit:        # quantized encoder is already placed by device_map; move only the heads
+        model.pooling.to(device); model.dropout.to(device); model.classifier.to(device)
+    else:
         model.to(device)
     model.encoder.config.pad_token_id = tokenizer.pad_token_id
     if args.freeze_encoder:
@@ -151,10 +160,10 @@ def train_and_evaluate(args):
               f"dev_acc={dev_metrics['accuracy']:.4f}")
         if dev_metrics["macro_f1"] > best_f1:
             best_f1 = dev_metrics["macro_f1"]
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = trainable_state(model)
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        model.load_state_dict(best_state, strict=False)
     dev_metrics, _ = run_eval(model, loaders["dev"], device, use_amp)
     test_metrics, test_pred = run_eval(model, loaders["test"], device, use_amp)
 
@@ -166,7 +175,7 @@ def train_and_evaluate(args):
     (results_dir / f"{run_name}_metrics.json").write_text(json.dumps(summary, indent=2))
     if args.save_model:
         ckpt = Path("checkpoints") / run_name; ckpt.mkdir(parents=True, exist_ok=True)
-        torch.save(model.state_dict(), ckpt / "model.pt")
+        torch.save(trainable_state(model), ckpt / "model.pt")
     print(f"[+] TEST  acc={test_metrics['accuracy']:.4f}  P={test_metrics['macro_precision']:.4f}  "
           f"R={test_metrics['macro_recall']:.4f}  F1={test_metrics['macro_f1']:.4f}")
     print(f"[+] predictions -> {results_dir / (run_name + '.csv')}   ground -> {results_dir / 'ground.csv'}")
