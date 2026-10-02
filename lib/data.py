@@ -1,95 +1,99 @@
-"""Build and load the SentiMix splits used by Experiment 2.
+"""Experiment 2 - data. Loads the SentiMix Hi-En splits produced by the shared `get_sentimix.py` (unchanged).
 
-The shared `get_sentimix.py` (master branch) only builds `train.csv`. This
-module re-uses its `process_dataset` function, unchanged, to build the `dev`
-and `test` splits in exactly the same CSV format:
+CSV columns written by the shared script:
+    id, sentence (python list of lower-cased word tokens), tags (python list of word-level LID tags), sentiment
 
-    id, sentence (python-list of tokens), tags (python-list of LID tags), sentiment
-
-The SentiMix test file on HuggingFace is unlabelled; its sentiment labels live
-in `test_labels_hinglish.txt` (columns: Uid, Sentiment). We join them by id.
+Tags are normalised to the shared script's final scheme {h, e, o}. The intermediate scheme
+{hin, eng, o, emt} is accepted as well, in case the last post-processing step of `get_sentimix.py`
+did not run (it looks up `dataset/sentimix` in lower case, which fails on case-sensitive file systems).
 """
 
 import ast
 import os
-import sys
 from pathlib import Path
 
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))          # so `import get_sentimix` works from anywhere
 
-LABEL2ID = {"negative": 0, "neutral": 1, "positive": 2}
-ID2LABEL = {v: k for k, v in LABEL2ID.items()}
-LID_TAGS = ["hin", "eng", "o"]              # SentiMix word-level language tags (lower-cased by get_sentimix.py)
+LABELS = ["negative", "neutral", "positive"]
+LABEL2ID = {l: i for i, l in enumerate(LABELS)}
+ID2LABEL = {i: l for l, i in LABEL2ID.items()}
+
+LID_TAGS = ["h", "e", "o"]                      # hindi / english / other (scheme of get_sentimix.py)
 LID2ID = {t: i for i, t in enumerate(LID_TAGS)}
-# SentiMix also contains a rare `emt` (emoticon) tag (~0.1% of tokens); we fold it into `o`
-# so the tagger and the switch logic work with the 3-way EN / HI / O scheme of the task.
-TAG_NORMALISE = {"emt": "o"}
+LID_SPECIAL = len(LID_TAGS)                     # LID index for special tokens (CLS/SEP/BOS) and padding
+# `emt` (emoticon) is mapped to `e` because that is what get_sentimix.replace_emt_tags does.
+TAG_NORMALISE = {"h": "h", "e": "e", "o": "o", "hin": "h", "eng": "e", "emt": "e"}
 
 
 def dataset_dir() -> Path:
+    """`<DATA_HOME>/<datacard name>` as configured in .env (see .env.example)."""
     from dotenv import load_dotenv
     load_dotenv(REPO_ROOT / ".env")
-    data_home = os.getenv("DATA_HOME")
-    datacard = os.getenv("HG_DATACARD")
-    if data_home is None or datacard is None:
-        raise ValueError("DATA_HOME / HG_DATACARD must be defined in .env (see .env.example)")
-    return REPO_ROOT / data_home / datacard.split("/")[-1]
-
-
-def build_splits(force: bool = False) -> None:
-    """Create train.csv / dev.csv / test.csv via the shared processing script."""
-    import get_sentimix                                   # shared, do not modify
-    ddir = dataset_dir()
-
-    if force or not (ddir / "train.csv").exists():
-        get_sentimix.process_dataset("HG_DATACARD", "train", is_roman=True)
-    if force or not (ddir / "dev.csv").exists():
-        get_sentimix.process_dataset("HG_DATACARD", "dev", is_roman=True)
-    if force or not (ddir / "test.csv").exists():
-        # raw file is `Hindi_test_unalbelled_conll_updated.txt` -> prefix "Hindi_test_"
-        get_sentimix.process_dataset("HG_DATACARD", "Hindi_test", is_roman=True)
-        unlabelled = pd.read_csv(ddir / "Hindi_test.csv")
-        labels = pd.read_csv(ddir / "test_labels_hinglish.txt").rename(
-            columns={"Uid": "id", "Sentiment": "sentiment"})
-        labels["sentiment"] = labels["sentiment"].str.strip().str.lower()
-        merged = unlabelled.drop(columns=["sentiment"]).merge(labels, on="id", how="inner")
-        merged = merged[["id", "sentence", "tags", "sentiment"]]
-        merged.to_csv(ddir / "test.csv", index=False)
-        print(f"[SUCCESS] Dataset saved to {ddir / 'test.csv'}  ({len(merged)} labelled rows)")
+    data_home, datacard = os.getenv("DATA_HOME"), os.getenv("HG_DATACARD")
+    if not data_home or not datacard:
+        raise ValueError("DATA_HOME and HG_DATACARD must be defined in .env (copy .env.example)")
+    base = Path(data_home)
+    if not base.is_absolute():
+        base = REPO_ROOT / base
+    return base / datacard.split("/")[-1]
 
 
 def load_split(split: str) -> pd.DataFrame:
-    """Return a DataFrame with columns id, tokens (list[str]), tags (list[str]), label (int)."""
+    """Columns: id (str), tokens (list[str]), tags (list[str] in {h,e,o}), sentiment (str), label (int)."""
     path = dataset_dir() / f"{split}.csv"
     if not path.exists():
-        build_splits()
-    df = pd.read_csv(path)
+        raise FileNotFoundError(f"{path} not found - run `python3 get_sentimix.py` first")
+    df = pd.read_csv(path, dtype=str)
     df["tokens"] = df["sentence"].apply(ast.literal_eval)
-    df["tags"] = df["tags"].apply(lambda ts: [TAG_NORMALISE.get(t.lower(), t.lower()) for t in ast.literal_eval(ts)])
+    df["tags"] = df["tags"].apply(lambda s: [TAG_NORMALISE.get(t.lower(), "o") for t in ast.literal_eval(s)])
     df["sentiment"] = df["sentiment"].str.strip().str.lower()
-    df = df[df["sentiment"].isin(LABEL2ID)].reset_index(drop=True)
+    df = df[df["sentiment"].isin(LABEL2ID) & (df["tokens"].apply(len) > 0)].copy()
+    assert (df["tokens"].apply(len) == df["tags"].apply(len)).all(), f"{split}: token/tag length mismatch"
     df["label"] = df["sentiment"].map(LABEL2ID)
-    # drop empty / malformed rows; the shared parser emits a few rows with a non-numeric id
-    # (a token literally spelled "meta") and one exact duplicate per training split
-    df = df[df["tokens"].apply(len) > 0]
-    df = df[pd.to_numeric(df["id"], errors="coerce").notna()]
-    df["id"] = df["id"].astype(int)
-    df = df.drop_duplicates(subset="id", keep="first").reset_index(drop=True)
-    assert (df["tokens"].apply(len) == df["tags"].apply(len)).all(), "token/tag length mismatch"
-    return df[["id", "tokens", "tags", "sentiment", "label"]]
+    return df[["id", "tokens", "tags", "sentiment", "label"]].reset_index(drop=True)
 
 
-def load_predicted_tags(split: str, pred_dir: Path) -> dict:
-    """Map id -> list[str] of LID tags predicted by lib/lid_tagger.py."""
-    df = pd.read_csv(Path(pred_dir) / f"{split}_pred_tags.csv")
-    return {row["id"]: ast.literal_eval(row["pred_tags"]) for _, row in df.iterrows()}
+def load_predicted_tags(path) -> dict:
+    """id -> list[str] of word-level LID tags from a CSV with columns `id, pred_tags`."""
+    df = pd.read_csv(path, dtype=str)
+    return {r["id"]: [TAG_NORMALISE.get(t.lower(), "o") for t in ast.literal_eval(r["pred_tags"])]
+            for _, r in df.iterrows()}
 
 
-if __name__ == "__main__":
-    build_splits(force="--force" in sys.argv)
-    for s in ["train", "dev", "test"]:
-        d = load_split(s)
-        print(f"{s:5s}: {len(d):6d} rows | label dist: {d['sentiment'].value_counts().to_dict()}")
+def encode_words(tokenizer, words, max_length: int):
+    """Tokenise a pre-split tweet as natural text and align every sub-word to its word.
+
+    Returns (input_ids, attention_mask, word_index) where word_index[j] is the index of the word that
+    sub-word j belongs to, or None for special tokens. Works for WordPiece (mBERT), SentencePiece
+    (XLM-R) and byte-level BPE (Qwen) tokenizers alike because the alignment uses character offsets
+    of the space-joined text, so GPT-style tokenizers keep their usual leading-space tokens.
+    """
+    text, spans = "", []
+    for w in words:
+        if text:
+            text += " "
+        spans.append((len(text), len(text) + len(w)))
+        text += w
+    try:
+        enc = tokenizer(text, truncation=True, max_length=max_length, return_offsets_mapping=True)
+        offsets = enc.pop("offset_mapping")
+    except (NotImplementedError, TypeError):            # slow tokenizer: fall back to word_ids()
+        enc = tokenizer(words, is_split_into_words=True, truncation=True, max_length=max_length)
+        return enc["input_ids"], enc["attention_mask"], enc.word_ids()
+    special_ids = set(tokenizer.all_special_ids) - {tokenizer.unk_token_id}   # <unk> still covers a word
+    word_index, j = [], 0
+    for tok_id, (s, e) in zip(enc["input_ids"], offsets):
+        if e == 0 or tok_id in special_ids:
+            word_index.append(None)
+            continue
+        while j < len(spans) - 1 and spans[j][1] <= s:   # advance to the word containing offset s
+            j += 1
+        word_index.append(j)
+    return enc["input_ids"], enc["attention_mask"], word_index
+
+
+def lid_ids_for_subwords(word_index, tags) -> list:
+    """Map the per-word LID tags onto sub-word positions (special tokens -> LID_SPECIAL)."""
+    return [LID_SPECIAL if w is None else LID2ID[tags[w]] for w in word_index]
